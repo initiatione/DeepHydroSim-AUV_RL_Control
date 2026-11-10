@@ -1,17 +1,65 @@
-# RL-based AUV Control Framework— DeepHydroSim
+# DeepHydroSim — RL-based AUV Control
 
-A sim-to-real reinforcement learning framework for Autonomous Underwater Vehicle (AUV) navigation that bridges high-fidelity hydrodynamic simulation with scalable RL training.
+A sim-to-real reinforcement learning framework for Autonomous Underwater Vehicle (AUV)
+navigation that bridges high-fidelity hydrodynamic simulation with scalable RL training.
 
-**Core idea:** Stonefish provides physically accurate 6-DOF hydrodynamic data for a GIRONA500 AUV. An MLP (`DeepHydroMLP`) learns the nonlinear fluid dynamics from that data. The trained MLP is embedded as a custom plugin inside MuJoCo, enabling fast, differentiable RL training while retaining realistic hydrodynamics — without paying the runtime cost of a full CFD simulator.
+**Core idea.** [Stonefish](https://github.com/patrykcieslak/stonefish) provides physically
+accurate 6-DOF hydrodynamic data for a GIRONA500-class AUV. An MLP (`DeepHydroMLP`) learns
+the nonlinear fluid dynamics from that data. The trained MLP is embedded as a custom plugin
+inside MuJoCo, enabling fast RL training with realistic hydrodynamics — without paying the
+runtime cost of a full CFD simulator.
 
 <p align="center">
   <img src="assets/teacher_student_simulators.png" width="88%">
 </p>
 <p align="center"><sub>(a) <b>Teacher</b> — Stonefish (NED frame): high-fidelity data collection &nbsp;|&nbsp; (b) <b>Student</b> — MuJoCo (ENU frame): scalable RL training with learned hydrodynamics</sub></p>
 
+> **This repository is a fork with a full reproduction pass.**
+> On top of the released code it adds a corrected hydrodynamic plant, the
+> `PhysicsFeature-MLP` from the paper, an evaluation/replay toolchain, and a written
+> reproduction report. Every headline number below is reproducible from this tree —
+> see [`REPRODUCTION.md`](REPRODUCTION.md) for the protocol, the commands and the
+> results that could *not* be reproduced.
+
 ---
 
-## Architecture Overview
+## Reproduction highlights
+
+| Item | Paper | This repository |
+|---|---|---|
+| Hydro-MLP accuracy (pooled RMSE) | 11.81 | **2.25** (Baseline) / **2.06** (PhysFeature)¹ |
+| Open-loop replay vs Stonefish (surge RMSE) | 1.784 → 0.996 m/s | **2.391 → 0.095 m/s**² |
+| Stage 1 — point-to-point | 100% | **100%** (85 steps) |
+| Stage 2 — sonar obstacle avoidance | 100% | **100% / 80% / 80%**³ |
+| Stage 3 — A\*-guided domain navigation | 95% | **90%** (786 steps) |
+
+¹ The paper's numbers come from a label bug: `Thruster::getSetpoint()` returns the target
+rotor speed (rad/s), but it was summed as if it were thrust (N). Recording
+`Thruster::getThrust()` and re-deriving the labels drops the error by 84%.
+See `REPRODUCTION.md` §3.6.
+
+² Nine 10 s segments (90 s total) replayed open-loop through MuJoCo; the two columns are
+no-hydrodynamic-model vs. learned plant. `scripts/replay_table3.py`.
+
+³ Curriculum levels 2 / 3 / 4 (level 4 = fixed 8-pillar slalom). The paper's 100% was
+obtained on the old plant, whose surge force was hard-coded as `30|u| + 12u²` and reached
+20.6 m/s at full thrust; the corrected plant tops out at 1.36 m/s, so the same task is
+substantially harder.
+
+### What did *not* reproduce
+
+The paper argues that `PhysicsFeature-MLP` prevents closed-loop divergence caused by the
+plain MLP using the acceleration channel as a shortcut for the nonlinear drag law. That
+divergence turned out to be an implementation bug — the Kalman filter that estimates
+acceleration was stepped with the physics timestep (`0.002 s`) instead of the control
+period (`0.1 s`), inflating the estimate by 50×. With the timestep fixed, the plain
+Baseline also reaches 100%. PhysFeature consequently shows no measurable advantage in
+closed loop (95% vs. 100%, single seed) or in open-loop replay (0.095 vs. 0.095 m/s),
+despite being 8.8% better offline.
+
+---
+
+## Architecture
 
 ```
 ┌─────────────────────┐      CSV logs       ┌─────────────────────┐
@@ -30,12 +78,16 @@ A sim-to-real reinforcement learning framework for Autonomous Underwater Vehicle
                                             └─────────────────────┘
 ```
 
+The teacher simulates the **GIRONA500** (`sf::FeatherstoneRobot`, 8 thrusters); the student
+uses `mujoco_sim/assets/yuyuan.xml`, which mirrors the same mass, inertia and thruster
+layout.
+
 ---
 
-## Repository Structure
+## Repository structure
 
 ```
-AUV_DRL_Navigation/
+.
 ├── cpp_sim/                        # Stonefish data-collection application
 │   └── src/
 │       ├── MyAUVManager.{h,cpp}    # Simulation manager: robot, scene, data loop
@@ -44,53 +96,59 @@ AUV_DRL_Navigation/
 │       │   ├── MotionController.h  # 6-DOF → 8-thruster mixing
 │       │   └── MotionStrategy.h    # PID, MaxThrust, HybridDataCollection, OU noise
 │       └── utils/
-│           ├── DataCollector.h     # CSV logger (AUVState + 8 motor setpoints)
-│           └── analysing_damping.py# Post-process: identify drag coefficients
+│           ├── DataCollector.h     # CSV logger (state + setpoints + true thrust)
+│           └── analysing_damping.py
 │
 ├── hydro_MLP/                      # MLP training pipeline
-│   ├── config.yaml                 # Training hyperparameters
+│   ├── config.yaml                 # Model / training configuration
 │   └── src/
-│       ├── model.py                # DeepHydroMLP  12→128→256→128→6
-│       ├── dataset.py              # HydroDataset with train/val split
-│       ├── data_process.py         # Inverse-dynamics feature extraction
-│       ├── data_analysis.py        # Data quality / distribution analysis
-│       ├── train.py                # Training entry point
-│       ├── evaluate.py             # Aggregate evaluation metrics
-│       └── evaluate_detail.py      # Per-DOF and per-sample analysis
+│       ├── model.py                # DeepHydroMLP, PhysFeatureMLP, build_model()
+│       ├── dataset.py              # Contiguous-block split (no temporal leakage)
+│       ├── data_process.py         # Inverse-dynamics label extraction
+│       ├── prepare_data.py         # Merge raw Stonefish logs
+│       ├── downsample.py           # 200 Hz → 50 Hz
+│       ├── data_analysis.py
+│       ├── train.py
+│       ├── evaluate.py             # Aggregate metrics
+│       └── evaluate_detail.py      # Per-DOF / per-sample analysis
 │
-├── mujoco_sim/                     # MuJoCo RL training environment
+├── mujoco_sim/                     # MuJoCo RL environment
 │   ├── configs/
 │   │   ├── config.yaml             # SAC hyperparameters, Hydra defaults
-│   │   ├── env/default.yaml        # Environment parameters
+│   │   ├── env/default.yaml        # Legacy plant (setpoint-as-force labels)
+│   │   ├── env/thrust.yaml         # Corrected plant (true-thrust labels)
 │   │   └── task/
 │   │       ├── stage1_navigate.yaml
 │   │       ├── stage2_avoidance.yaml
 │   │       └── stage3_domain_navigation.yaml
 │   ├── scripts/
 │   │   ├── train.py                # SAC training with curriculum & WandB
-│   │   ├── evaluate.py             # MuJoCo passive-viewer evaluation
+│   │   ├── eval_policy.py          # Deterministic N-episode evaluation
+│   │   ├── bench_control.py        # Closed-loop tracking / terminal velocity
+│   │   ├── replay_stonefish.py     # Replay recorded thrust through MuJoCo
+│   │   ├── replay_table3.py        # Paper Table III protocol (9 × 10 s)
+│   │   ├── evaluate.py             # Passive-viewer evaluation
 │   │   ├── enjoy_rl.py             # Interactive rollout viewer
-│   │   └── check_env.py            # Sanity-check the Gym environment
+│   │   └── check_env.py
 │   └── src/
 │       ├── core/
-│       │   ├── hydro_plugin.py     # HydroInference: MLP inference inside MuJoCo step
-│       │   ├── robot.py            # AUVRobot: kinematics, thruster mixing
-│       │   ├── sensors.py          # IMU, DVL sensor wrappers
-│       │   └── scene_builder.py    # MuJoCo XML scene construction
+│       │   ├── hydro_plugin.py     # MLP inference inside the MuJoCo step loop
+│       │   ├── models.py           # Online mirror of the MLP architectures
+│       │   ├── robot.py            # Kinematics, thruster mixing
+│       │   ├── sensors.py          # IMU, DVL, sonar wrappers
+│       │   └── scene_builder.py
 │       ├── envs/
 │       │   ├── auv_base_env.py     # Gymnasium base environment
 │       │   └── tasks/
-│       │       ├── navigation_task.py          # Stage 1: point-to-point
-│       │       ├── avoidance_task.py           # Stage 2: obstacle avoidance
-│       │       └── domain_navigation_task.py   # Stage 3: A* + arc-length progress
+│       │       ├── navigation_task.py
+│       │       ├── avoidance_task.py
+│       │       └── domain_navigation_task.py
 │       └── utils/
-│           ├── kalman_filter.py    # KalmanFilter6D for acceleration estimation
-│           ├── astar_planner.py    # A* on occupancy grid → arc-length trajectory
-│           ├── logger.py           # WandB + TensorBoard integration
-│           ├── check_mlp.py        # Verify MLP predictions against logged data
-│           ├── verify_sensors.py   # Unit tests for sensor wrappers
-│           └── verify_imu.py       # IMU rotation matrix consistency checks
+│           ├── kalman_filter.py    # KalmanFilter6D acceleration estimation
+│           ├── astar_planner.py    # A* on occupancy grid → arc-length path
+│           └── ...
 │
+├── REPRODUCTION.md                 # Full reproduction report (Chinese)
 ├── requirements.txt
 └── README.md
 ```
@@ -107,13 +165,11 @@ AUV_DRL_Navigation/
 | Stonefish | Built from source — see [Stonefish docs](https://stonefish.readthedocs.io) |
 | C++ compiler | GCC ≥ 11 or Clang ≥ 14, CMake ≥ 3.16 |
 
----
-
 ## Installation
 
 ```bash
-git clone https://github.com/HoshinoRay/AUV_DRL_Navigation.git
-cd AUV_DRL_Navigation
+git clone https://github.com/initiatione/DeepHydroSim-AUV_RL_Control.git
+cd DeepHydroSim-AUV_RL_Control
 pip install -r requirements.txt
 ```
 
@@ -132,81 +188,110 @@ make -j$(nproc)
 
 ### Step 1 — Collect hydrodynamic data (Stonefish)
 
-Run the compiled application. The `HybridDataCollectionStrategy` automatically executes deterministic per-DOF sinusoidal manoeuvres (surge, heave, roll, pitch, yaw, and coupled tests) followed by stochastic Ornstein-Uhlenbeck exploration:
+`HybridDataCollectionStrategy` runs nine deterministic manoeuvres (surge, heave, roll,
+pitch, yaw, two circles, and three coupled patterns) followed by stochastic
+Ornstein–Uhlenbeck exploration:
 
 ```bash
 ./cpp_sim/build/MyAUVApp
 ```
 
-Logs are written to `cpp_sim/logs/GeneralMission_<timestamp>.csv`.  
-Inspect drag coefficients from the collected data:
+Logs are written to `cpp_sim/logs/GeneralMission_<timestamp>.csv`. Each row records both
+the commanded setpoint (`M_*`) and the **true propeller thrust** (`T_*`, N).
+
+`SF_MAX_TIME` stops the run at a fixed simulated time, which makes long collections
+terminate deterministically instead of relying on an external timeout:
 
 ```bash
-python cpp_sim/src/utils/analysing_damping.py          # auto-selects latest log
-python cpp_sim/src/utils/analysing_damping.py path/to/log.csv
+SF_MAX_TIME=17151 ./cpp_sim/build/MyAUVApp
 ```
-
----
 
 ### Step 2 — Train the hydrodynamic MLP
 
 ```bash
 cd hydro_MLP
-python src/data_process.py        # inverse-dynamics feature extraction
-python src/train.py               # trains DeepHydroMLP (12 → 128 → 256 → 128 → 6)
+python src/prepare_data.py        # merge raw logs
+python src/data_process.py        # inverse-dynamics labels (uses T_* when present)
+python src/downsample.py          # 200 Hz → 50 Hz (4× decimation)
+python src/train.py               # model.type = baseline | physfeature
 python src/evaluate.py            # aggregate metrics
 python src/evaluate_detail.py     # per-DOF analysis
 ```
 
-Trained weights and scalers are saved to `hydro_MLP/models/`.
+Weights and scalers are written to `hydro_MLP/models/`.
 
-**DeepHydroMLP architecture:**
-```
-Input  (12):  [u, v, w, p, q, r, u̇, v̇, ẇ, ṗ, q̇, ṙ]  — velocity + acceleration in NED
-Output  (6):  [Fx, Fy, Fz, Mx, My, Mz]                 — hydrodynamic wrench
-```
+**Model:** `DeepHydroMLP` — 12 → 128 → 256 → 128 → 6 (71 K parameters).
+`PhysFeatureMLP` expands the 12-D input to a 33-D basis
+`[ν, ν̇, ν|ν|, νᵢνⱼ]` before the same hourglass.
 
-**Inverse dynamics used for label generation:**
+**Label generation:**
+
 ```
 F_fluid = τ_prop − M_total · a̅
 ```
-where `M_total` is the rigid-body + added-mass diagonal and `a̅` is smoothed via Savitzky-Golay + finite difference.
 
----
+where `τ_prop` comes from the recorded thruster thrust, `M_total` is the rigid-body +
+added-mass diagonal, and `a̅` is smoothed with Savitzky–Golay + finite differences.
 
 ### Step 3 — Train the RL agent (MuJoCo)
 
-Place trained MLP weights into `mujoco_sim/src/weights/`.  
-Edit `mujoco_sim/configs/config.yaml` to point `weights_dir` at your model.
+Copy the trained MLP into `mujoco_sim/weights/` (or `weights_thrust_baseline/`) and point
+`configs/env/<profile>.yaml → weights` at it. **Model weights are not committed to this
+repository** (`*.pth` and `*.pkl` are gitignored) — train them with Step 2 first.
 
 ```bash
 cd mujoco_sim
-python scripts/train.py                         # stage 1 navigation (default)
-python scripts/train.py task=stage2_avoidance   # stage 2 obstacle avoidance
-python scripts/train.py task=stage3_domain_navigation  # stage 3 A*-guided navigation
+
+# corrected plant (true-thrust weights)
+python scripts/train.py env=thrust task=stage1_navigate
+python scripts/train.py env=thrust task=stage2_avoidance
+python scripts/train.py env=thrust task=stage3_domain_navigation
+
+# legacy plant (released behaviour)
+python scripts/train.py env=default task=stage1_navigate
 ```
 
-The training loop uses **SAC** (Stable Baselines3) with:
-- `VecNormalize` for observation and reward normalisation
-- Curriculum advancement on rolling success-rate threshold
-- WandB + TensorBoard logging
-- Automatic checkpoint saving every `save_freq` steps
+Training uses **SAC** (Stable Baselines3) with `VecNormalize`, curriculum advancement on a
+rolling success-rate threshold, WandB + TensorBoard logging, and periodic checkpoints.
 
----
+**Warm-starting a stage is not just loading the weights.** A policy trained on a different
+reward scale needs the inherited `VecNormalize` statistics and replay buffer, otherwise the
+critic's TD targets jump by the ratio of the return scales and the actor is blown away:
 
-### Step 4 — Evaluate
+```bash
+python scripts/train.py env=thrust task=stage2_avoidance total_timesteps=600000 \
+  hyperparams.learning_rate=1e-4 \
+  pretrained.model_path=outputs/<stage1>/final_model.zip \
+  pretrained.vecnorm_path=outputs/<stage1>/vec_normalize.pkl \
+  pretrained.load_buffer=true \
+  pretrained.buffer_path=outputs/<stage1>/final_replay_buffer.pkl
+```
+
+### Step 4 — Evaluate and replay
 
 ```bash
 cd mujoco_sim
-python scripts/evaluate.py          # passive MuJoCo viewer
-python scripts/enjoy_rl.py          # interactive rollout with episode statistics
+
+# deterministic evaluation of a checkpoint
+python scripts/eval_policy.py task=stage2_avoidance env=thrust \
+  pretrained.model_path=outputs/<run>/final_model.zip \
+  +eval_episodes=20 +eval_stage=4
+
+# plant fidelity: replay recorded Stonefish thrust through MuJoCo
+python scripts/replay_stonefish.py
+
+# paper Table III protocol (nine 10 s segments, five plant variants)
+python scripts/replay_table3.py
+
+# closed-loop tracking and terminal-velocity comparison
+python scripts/bench_control.py
 ```
 
 ---
 
 ## Configuration
 
-All hyperparameters are managed with **Hydra** (`omegaconf`). Key settings in `mujoco_sim/configs/config.yaml`:
+All hyperparameters are managed with **Hydra**. Key settings in `mujoco_sim/configs/config.yaml`:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -218,21 +303,36 @@ All hyperparameters are managed with **Hydra** (`omegaconf`). Key settings in `m
 | `gradient_steps` | `${num_envs}` | UTD ratio kept at 1:1 |
 
 Override any parameter on the command line:
+
 ```bash
 python scripts/train.py total_timesteps=10000000 hyperparams.batch_size=256
 ```
 
+> **Note on evaluation noise.** `EvalCallback` uses Stable Baselines3's default of **5
+> episodes** per evaluation. At a true success rate of 0.8 the standard error of a 5-episode
+> estimate is 0.18, so swings between 0.60 and 1.00 are expected for an unchanged policy —
+> and `best_model` can be selected by noise. Judge convergence with 20+ episodes
+> (`eval_policy.py`) rather than the training curve.
+
+### Plant profiles
+
+| Profile | Weights | Notes |
+|---|---|---|
+| `env/default` | `weights/` | Released behaviour: rotor setpoints treated as thrust, hard-coded `30\|u\| + 12u²` surge override, `mlp_drag_scale=0.7` |
+| `env/thrust` | `weights_thrust_baseline/` | Corrected: true-thrust labels, no override, `mlp_drag_scale=1.0`, `force_clip=2000`, `(v/v_max)²` extrapolation, neutral buoyancy at 1806.9 N |
+
 ---
 
-## Curriculum Stages
+## Curriculum stages
 
 | Stage | Task | Key challenge |
 |-------|------|---------------|
 | 1 — `navigate` | Point-to-point (fixed start/goal) | Stable 6-DOF control |
-| 2 — `avoidance` | Navigate with static obstacles | Collision penalty shaping |
-| 3 — `domain_navigation` | A*-guided path in cluttered domain | Arc-length progress reward + PBRS |
+| 2 — `avoidance` | Navigate with static obstacles | Collision penalty shaping, sonar-only |
+| 3 — `domain_navigation` | A\*-guided path in a cluttered domain | Arc-length progress reward + PBRS |
 
-Stage 3 uses an arc-length coordinate system along the A* waypoint path, giving a monotonically increasing progress signal that avoids local reward plateaus.
+Stage 3 uses an arc-length coordinate along the A\* waypoint path, giving a monotonically
+increasing progress signal that avoids local reward plateaus.
 
 <p align="center">
   <img src="assets/auv_navigation_demo.jpg" width="55%">
@@ -241,11 +341,11 @@ Stage 3 uses an arc-length coordinate system along the A* waypoint path, giving 
 
 ---
 
-## Coordinate Frames
+## Coordinate frames
 
-The MLP is trained on Stonefish data logged in **NED** (North-East-Down).  
-MuJoCo uses **ENU** (East-North-Up).  
-The `HydroInference` plugin applies a sign-flip mask before inference and after output:
+The MLP is trained on Stonefish data logged in **NED** (North-East-Down); MuJoCo uses
+**ENU** (East-North-Up). The `HydroInference` plugin applies a sign-flip mask before
+inference and after the output:
 
 ```python
 COORD_MASK = [+1, -1, -1, +1, -1, -1]   # [Surge, Sway, Heave, Roll, Pitch, Yaw]
@@ -253,40 +353,41 @@ COORD_MASK = [+1, -1, -1, +1, -1, -1]   # [Surge, Sway, Heave, Roll, Pitch, Yaw]
 
 ---
 
-## Ablation: Simplified Mode
+## Ablation
 
-`HydroInference.predict()` accepts a `gain` parameter. Setting `gain=0.0` in the config zeros the MLP output while keeping all other dynamics intact, producing a **pure rigid-body baseline** for ablation experiments. This is controlled by the `simplified_mode` flag in `mujoco_sim/configs/env/default.yaml`.
+Setting `mlp_drag_scale: 0.0` zeros the learned drag term while keeping added mass,
+buoyancy and every other dynamic term intact — a pure rigid-body + added-mass baseline.
+`simplified_mode: true` does the same via the added-mass-only branch.
 
 ---
 
-## Dependencies
+## Known issues
 
-```
-numpy, pandas, scipy, scikit-learn, matplotlib   # scientific stack
-torch                                             # DeepHydroMLP
-mujoco, stable-baselines3, gymnasium             # RL environment
-hydra-core, omegaconf, wandb                     # experiment management
-joblib                                            # scaler serialisation
-```
-
-Install all at once: `pip install -r requirements.txt`
+- **Weights are not versioned.** `*.pth` / `*.pkl` are gitignored, so a fresh clone has no
+  trained plant. Run Step 2, or fetch the weights separately.
+- **`EvalCallback` evaluates 5 episodes.** See the note above; use `eval_policy.py` for
+  reported numbers.
+- **Stage 2 level 4 is sensitive to the episode budget.** Successful rollouts take
+  589–1188 control steps, so a 650-step training budget truncates correct behaviour into a
+  timeout penalty. Train and evaluate with `env.max_steps=1200`.
+- **Single-environment, CPU-bound training.** `mj_step` dominates (~52% of a step) and the
+  SAC update adds another ~65% of wall-clock; GPU utilisation stays near 4%. Parallelising
+  environments alone yields little because the update cost scales with the sample count.
 
 ---
 
 ## Citation
 
-If you use this work, please cite:
+If you use this work, please cite the original project:
 
 ```bibtex
 @misc{deephyrosim2025,
   author  = {Ray Wu},
   title   = {AUV Deep RL Navigation — DeepHydroSim},
   year    = {2025},
-  url     = {https://github.com/HoshinoRay/AUV_DRL_Navigation}
+  url     = {https://github.com/RayH-Wu/DeepHydroSim-AUV_RL_Control}
 }
 ```
-
----
 
 ## Acknowledgements
 
