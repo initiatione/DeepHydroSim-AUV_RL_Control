@@ -183,7 +183,14 @@ def main(cfg: DictConfig):
             model_path,
             env=env,
             device=cfg.device,
-            custom_objects={"learning_rate": cfg.hyperparams.learning_rate, "learning_starts": 0},
+            custom_objects={
+                "learning_rate": cfg.hyperparams.learning_rate,
+                # Fine-tuning across a plant change needs a few thousand fresh
+                # transitions before the loaded critic is updated, otherwise
+                # the first gradient steps are dominated by buffer duplicates
+                # and the pretrained actor collapses.
+                "learning_starts": int(cfg.pretrained.get("learning_starts", 0)),
+            },
             tensorboard_log=save_dir,
         )
         if cfg.pretrained.load_buffer and cfg.pretrained.buffer_path:
@@ -208,7 +215,7 @@ def main(cfg: DictConfig):
 
     # Callbacks
     checkpoint_cb = CheckpointCallback(
-        save_freq=50000,
+        save_freq=cfg.save_freq,
         save_path=os.path.join(save_dir, "checkpoints"),
         name_prefix="model",
         save_replay_buffer=True,
@@ -218,7 +225,7 @@ def main(cfg: DictConfig):
         eval_env,
         best_model_save_path=os.path.join(save_dir, "best_model"),
         log_path=os.path.join(save_dir, "eval_logs"),
-        eval_freq=max(10000, 1),
+        eval_freq=max(cfg.eval_freq, 1),
         deterministic=True,
         render=False,
     )
