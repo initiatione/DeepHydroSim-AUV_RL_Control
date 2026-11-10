@@ -50,6 +50,8 @@
 #include <core/ScenarioParser.h>
 #include <core/NED.h>
 #include <cmath>
+#include <cstdlib>
+#include <string>
 #include <actuators/Thruster.h>
 
 MyAUVManager::MyAUVManager(sf::Scalar stepsPerSecond)
@@ -59,6 +61,16 @@ MyAUVManager::MyAUVManager(sf::Scalar stepsPerSecond)
     dataCollector = new DataCollector();
     dataCollector->init("../logs", "GeneralMission_");
     motionController = new MotionController();
+
+    // Optional simulated-time stop, so a headless collection run terminates
+    // deterministically instead of relying on an external wall-clock timeout.
+    if (const char* env = std::getenv("SF_MAX_TIME")) {
+        maxTime = std::atof(env);
+        if (maxTime <= 0.0) maxTime = -1.0;
+    }
+    std::cout << "[MyAUVManager] Max simulated time: "
+              << (maxTime > 0.0 ? std::to_string(maxTime) + " s" : std::string("unlimited"))
+              << std::endl;
 
     auto hybridStrategy = std::make_shared<HybridDataCollectionStrategy>(1.0 / stepsPerSecond);
     motionController->setStrategy(hybridStrategy);
@@ -262,14 +274,23 @@ void MyAUVManager::SimulationStepCompleted(sf::Scalar timeStep)
     }
 
     state.motors.clear();
+    state.thrusts.clear();
     if (robot) {
         for (const std::string& name : this->thrusterNames) {
             sf::Thruster* th = dynamic_cast<sf::Thruster*>(robot->getActuator(name));
             state.motors.push_back(th ? th->getSetpoint() : 0.0);
+            state.thrusts.push_back(th ? th->getThrust() : 0.0);
         }
     }
 
     if (dataCollector) {
         dataCollector->log(currentTime, state);
+    }
+
+    if (maxTime > 0.0 && currentTime >= maxTime) {
+        std::cout << "[MyAUVManager] Reached SF_MAX_TIME (" << maxTime
+                  << " s), closing log." << std::endl;
+        if (dataCollector) dataCollector->close();
+        std::exit(0);
     }
 }

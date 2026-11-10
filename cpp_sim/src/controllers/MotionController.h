@@ -7,11 +7,23 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <cstdlib>
+#include <iostream>
 
 class MotionController {
 public:
     MotionController() {
         currentStrategy = std::make_shared<IdleStrategy>();
+        // Global command gain. Scales the *normalised* setpoint after the
+        // 6-DOF mix, so the thrust allocation stays identical while the
+        // excitation amplitude (and therefore the hydrodynamic target
+        // variance) is reduced. SF_CMD_GAIN=0.6 reproduces the excitation
+        // level implied by the paper's reported force statistics.
+        if (const char* env = std::getenv("SF_CMD_GAIN")) {
+            double g = std::atof(env);
+            if (g > 0.0 && g <= 1.0) gain = g;
+        }
+        std::cout << "[MotionController] Command gain: " << gain << std::endl;
     }
 
     void setStrategy(std::shared_ptr<MotionStrategy> newStrategy) {
@@ -31,6 +43,7 @@ public:
 
 private:
     std::shared_ptr<MotionStrategy> currentStrategy;
+    double gain = 1.0;
 
     const std::vector<std::string> thrusterNames = {
         "HorzFrontLeft",  "HorzFrontRight", "HorzRearLeft",   "HorzRearRight",
@@ -60,7 +73,7 @@ private:
 
         for (size_t i = 0; i < thrusterNames.size(); i++) {
             sf::Thruster* th = dynamic_cast<sf::Thruster*>(robot->getActuator(thrusterNames[i]));
-            if (th) th->setSetpoint(cmds[i] / max_val);
+            if (th) th->setSetpoint(gain * cmds[i] / max_val);
         }
     }
 };

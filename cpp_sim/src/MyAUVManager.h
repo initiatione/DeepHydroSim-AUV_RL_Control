@@ -25,6 +25,9 @@ private:
     DataCollector*    dataCollector;
     double            currentTime;
     MotionController* motionController;
+    // Optional stop time (simulated seconds) from SF_MAX_TIME; <= 0 means run
+    // until the window is closed.
+    double            maxTime = -1.0;
 };
 
 #endif

@@ -15,7 +15,8 @@ struct AUVState {
     double roll, pitch, yaw;  // Euler angles (rad)
     double u, v, w;           // Body-frame linear velocity: surge, sway, heave (m/s)
     double p, q, r;           // Body-frame angular velocity: roll, pitch, yaw rate (rad/s)
-    std::vector<double> motors; // Normalised thruster setpoints [-1, 1], length 8
+    std::vector<double> motors; // Thruster setpoints (target rotor speed, rad/s), length 8
+    std::vector<double> thrusts; // Actual generated thrust (N), length 8
 };
 
 class DataCollector {
@@ -40,6 +41,7 @@ public:
                 << "u(m/s),v(m/s),w(m/s),"
                 << "p(rad/s),q(rad/s),r(rad/s),"
                 << "M_FL,M_FR,M_RL,M_RR,M_VFL,M_VFR,M_VRL,M_VRR"
+                << ",T_FL,T_FR,T_RL,T_RR,T_VFL,T_VFR,T_VRL,T_VRR"
                 << "\n";
         return true;
     }
@@ -53,7 +55,14 @@ public:
                 << state.u << "," << state.v << "," << state.w << ","
                 << state.p << "," << state.q << "," << state.r;
         for (double m : state.motors) outFile << "," << m;
+        for (double t : state.thrusts) outFile << "," << t;
         outFile << "\n";
+        // Flush once per simulated second so a terminated run still leaves a
+        // complete, parseable CSV (the destructor is not called on SIGTERM).
+        if (++rows_since_flush >= 200) {
+            outFile.flush();
+            rows_since_flush = 0;
+        }
     }
 
     void close() {
@@ -67,6 +76,7 @@ public:
 private:
     std::ofstream outFile;
     bool is_open;
+    int  rows_since_flush = 0;
 
     std::string getCurrentTimestamp() {
         auto t  = std::time(nullptr);
