@@ -1,5 +1,7 @@
 # DeepHydroSim — RL-based AUV Control
 
+**English** | [简体中文](README.zh-CN.md)
+
 A sim-to-real reinforcement learning framework for Autonomous Underwater Vehicle (AUV)
 navigation that bridges high-fidelity hydrodynamic simulation with scalable RL training.
 
@@ -150,7 +152,8 @@ layout.
 │
 ├── REPRODUCTION.md                 # Full reproduction report (Chinese)
 ├── requirements.txt
-└── README.md
+├── README.md                       # English (this file)
+└── README.zh-CN.md                 # 简体中文
 ```
 
 ---
