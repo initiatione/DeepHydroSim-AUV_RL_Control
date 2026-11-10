@@ -6,11 +6,48 @@ frame_skip: 50
 max_steps: 650     
 render_mode: null   
 
+# false = full DeepHydroMLP drag + added mass (paper setting)
+# true  = added-mass-only rigid-body baseline (ablation)
+simplified_mode: false
+
+# Feed the Kalman-filter acceleration into the MLP. Disabled by default: with
+# the released filter the closed loop diverges under exploratory actions
+# (19 rad/s peak body rate). Set to true together with the two conditioning
+# knobs below to reproduce the paper's (nu, nu_dot) input.
+mlp_accel_input: false
+
+# Acceleration-channel conditioning (only used when mlp_accel_input is true):
+# EMA time constant matched to the Savitzky-Golay window used to build the
+# training targets (51 samples @ 200 Hz = 0.26 s), and a clip in units of
+# training standard deviations so the network never extrapolates.
+accel_smoothing_tau: 0.15
+accel_clip_sigma: 3.0
+
 randomization:
   pos_noise: [1.5, 1.5, 1.0]  # x, y, z 
   angle_noise: [0.3, 0.3, 0.2] # roll, pitch, yaw 
 
+# Surge handling. The released pipeline overrode the MLP's Fx with a
+# hand-tuned quadratic (30|u| + 12u^2) and scaled all MLP drag by 0.7, because
+# the training label used thruster setpoints (rad/s) as if they were thrust (N).
+# The thrust-corrected models predict Fx from real propulsion forces, so they
+# must run with surge_override=false and mlp_drag_scale=1.0.
+surge_override: true
+mlp_drag_scale: 0.7
+# Network output clamp (N / Nm) and velocity clamp (m/s) fed to the model.
+# 180 / 1.3 match the legacy deployment. The thrust-corrected model predicts up
+# to ~400 N of surge drag within its training envelope, so use 600 / 1.35.
+force_clip: 180.0
+max_lin_vel: 1.3
+# Legacy behaviour: no extrapolation (the surge override caps drag at 200 N).
+extrapolate: false
+# Released value: 17 N negative (MuJoCo gravity is 1806.9 N).
+buoyancy_magnitude: 1790.0
+
 weights:
+  # "baseline"    = DeepHydroMLP (raw nu, nu_dot)
+  # "physfeature" = PhysFeatureMLP (v|v| + cross-axis features)
+  model_type: "baseline"
   mlp: "weights/best_hydro_model.pth"
   scaler_x: "weights/scaler_X.pkl"
   scaler_y: "weights/scaler_Y.pkl"

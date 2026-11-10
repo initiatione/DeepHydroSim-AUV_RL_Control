@@ -36,6 +36,11 @@ class AUVGymEnv(gym.Env):
         self.model = mujoco.MjModel.from_xml_path(cfg_env.xml_path)
         self.data = mujoco.MjData(self.model)
         self.dt = self.model.opt.timestep
+        # Interval between two hydrodynamics updates. The plugin is called once
+        # per env.step(), i.e. every frame_skip physics steps — passing the
+        # physics timestep instead would make the Kalman filter's
+        # constant-acceleration model disagree with reality by frame_skip x.
+        self.control_dt = float(cfg_env.frame_skip) * self.dt
         self.render_mode = cfg_env.render_mode
 
         # Core components
@@ -54,7 +59,18 @@ class AUVGymEnv(gym.Env):
             cfg_env.weights.mlp,
             cfg_env.weights.scaler_x,
             cfg_env.weights.scaler_y,
-            self.dt,
+            self.control_dt,
+            simplified_mode=bool(cfg_env.get("simplified_mode", False)),
+            mlp_accel_input=bool(cfg_env.get("mlp_accel_input", False)),
+            accel_smoothing_tau=float(cfg_env.get("accel_smoothing_tau", 0.15)),
+            accel_clip_sigma=float(cfg_env.get("accel_clip_sigma", 3.0)),
+            model_type=str(cfg_env.weights.get("model_type", "baseline")),
+            surge_override=bool(cfg_env.get("surge_override", True)),
+            mlp_drag_scale=float(cfg_env.get("mlp_drag_scale", 0.7)),
+            force_clip=float(cfg_env.get("force_clip", 180.0)),
+            max_lin_vel=float(cfg_env.get("max_lin_vel", 1.3)),
+            extrapolate=bool(cfg_env.get("extrapolate", False)),
+            buoyancy_magnitude=float(cfg_env.get("buoyancy_magnitude", 1790.0)),
         )
 
         # Task
