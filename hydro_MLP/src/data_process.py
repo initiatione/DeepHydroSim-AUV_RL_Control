@@ -20,11 +20,13 @@ import numpy as np
 import pandas as pd
 from scipy.signal import savgol_filter
 
+from paths import path as pkg_path
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-INPUT_CSV_PATH = '../data/phy_processed/mission_log_processed_Physics.csv'
-OUTPUT_CSV_PATH = '../data/phy_processed/mission_log_processed_Physics_out.csv'
+INPUT_CSV_PATH = pkg_path('data/phy_processed/mission_log_processed.csv')
+OUTPUT_CSV_PATH = pkg_path('data/phy_processed/mission_log_processed_Physics.csv')
 
 # Rigid-body parameters
 MASS_RIGID = 151.349        # kg
@@ -64,13 +66,20 @@ def _total_mass_vector() -> np.ndarray:
     ])
 
 
-def process_data():
-    if not os.path.exists(INPUT_CSV_PATH):
-        print(f"[Error] File not found: {INPUT_CSV_PATH}")
+def process_data(input_path=INPUT_CSV_PATH, output_path=OUTPUT_CSV_PATH,
+                 decimate_before=1):
+    if not os.path.exists(input_path):
+        print(f"[Error] File not found: {input_path}")
         return
 
-    print(f"[DataProcess] Reading: {INPUT_CSV_PATH}")
-    df = pd.read_csv(INPUT_CSV_PATH)
+    print(f"[DataProcess] Reading: {input_path}")
+    df = pd.read_csv(input_path)
+    if decimate_before > 1:
+        # Paper variant: decimate to 50 Hz *before* differentiation, so the
+        # fixed 51-point Savitzky-Golay window spans 1.02 s instead of 0.255 s.
+        df = df.iloc[::decimate_before].reset_index(drop=True)
+        print(f"[DataProcess] Decimated by {decimate_before} before smoothing "
+              f"-> {len(df)} rows")
 
     # ---- 1. Extract time and velocity ----
     time_arr = df['Time(s)'].values
@@ -80,9 +89,17 @@ def process_data():
     vel_cols = ['u(m/s)', 'v(m/s)', 'w(m/s)', 'p(rad/s)', 'q(rad/s)', 'r(rad/s)']
     velocities = df[vel_cols].values
 
-    # ---- 2. Extract thruster setpoints ----
+    # ---- 2. Extract thruster forces ----
+    # New logs record the actual generated thrust (T_*, N).  Older logs only
+    # have the target rotor speed (M_*, rad/s), which is *not* a force: the
+    # FDThrust model is quadratic in rotor speed and the rotor has PI lag.
     motor_cols = ['M_FL', 'M_FR', 'M_RL', 'M_RR', 'M_VFL', 'M_VFR', 'M_VRL', 'M_VRR']
-    thrusts = df[motor_cols].values
+    thrust_cols = ['T_FL', 'T_FR', 'T_RL', 'T_RR', 'T_VFL', 'T_VFR', 'T_VRL', 'T_VRR']
+    use_actual_thrust = all(c in df.columns for c in thrust_cols)
+    src_cols = thrust_cols if use_actual_thrust else motor_cols
+    print(f"[DataProcess] Wrench source: "
+          f"{'actual thrust (N)' if use_actual_thrust else 'setpoints (rad/s, legacy)'}")
+    thrusts = df[src_cols].values
     FL, FR, RL, RR = thrusts[:, 0], thrusts[:, 1], thrusts[:, 2], thrusts[:, 3]
     VFL, VFR, VRL, VRR = thrusts[:, 4], thrusts[:, 5], thrusts[:, 6], thrusts[:, 7]
 
@@ -123,8 +140,8 @@ def process_data():
         result_df[f'F_Inertial_{ax}(N)'] = F_inertial[:, i]
         result_df[f'F_Fluid_{ax}(N)'] = F_fluid[:, i]
 
-    result_df.to_csv(OUTPUT_CSV_PATH, index=False, float_format='%.6f')
-    print(f"[DataProcess] Saved to: {OUTPUT_CSV_PATH}")
+    result_df.to_csv(output_path, index=False, float_format='%.6f')
+    print(f"[DataProcess] Saved to: {output_path}")
 
     # Quick sanity check on the last row
     last = len(result_df) - 1
@@ -138,4 +155,13 @@ def process_data():
 
 
 if __name__ == '__main__':
-    process_data()
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--input', default=INPUT_CSV_PATH)
+    parser.add_argument('--output', default=OUTPUT_CSV_PATH)
+    parser.add_argument('--decimate-before', type=int, default=1,
+                        help='Decimate raw rows before differentiation '
+                             '(4 turns the 200 Hz log into the 50 Hz paper rate).')
+    _args = parser.parse_args()
+    process_data(_args.input, _args.output, _args.decimate_before)

@@ -13,16 +13,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
+import yaml
 from sklearn.metrics import mean_absolute_error, r2_score
 
-from model import DeepHydroMLP
+from model import build_model
+from paths import path as pkg_path
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-MODEL_PATH = '../models/best_hydro_model.pth'
-SCALER_DIR = '../models/'
-CSV_PATH = '../data/phy_processed/mission_log_processed_Physics.csv'
+MODEL_PATH = os.environ.get('MODEL_PATH', pkg_path('models/best_hydro_model.pth'))
+SCALER_DIR = os.environ.get('SCALER_DIR', pkg_path('models'))
+CSV_PATH = pkg_path('data/phy_processed/mission_log_processed_Physics.csv')
 DEVICE = torch.device('cpu')
 
 # Contiguous slice to visualise (index range within the CSV)
@@ -48,13 +50,23 @@ def main():
     scaler_X = joblib.load(os.path.join(SCALER_DIR, 'scaler_X.pkl'))
     scaler_Y = joblib.load(os.path.join(SCALER_DIR, 'scaler_Y.pkl'))
 
-    model = DeepHydroMLP(input_dim=12, output_dim=6).to(DEVICE)
+    model_type = 'baseline'
+    hidden_dims = (128, 256, 128)
+    meta_path = os.path.join(SCALER_DIR, 'model_meta.yaml')
+    if os.path.exists(meta_path):
+        with open(meta_path) as f:
+            meta = yaml.safe_load(f) or {}
+        model_type = meta.get('type', model_type)
+        hidden_dims = tuple(meta.get('hidden_dims', hidden_dims))
+    model = build_model(model_type, input_dim=12, output_dim=6,
+                        hidden_dims=hidden_dims).to(DEVICE)
     model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
     model.eval()
 
-    # Extract a contiguous slice from the CSV
+    # Extract a contiguous slice from the CSV (clamped to the file length)
     df = pd.read_csv(CSV_PATH)
-    df_slice = df.iloc[VISUALIZE_START_IDX: VISUALIZE_START_IDX + VISUALIZE_LEN]
+    start_idx = min(VISUALIZE_START_IDX, max(0, len(df) - VISUALIZE_LEN))
+    df_slice = df.iloc[start_idx: start_idx + VISUALIZE_LEN]
     X_raw = df_slice[INPUT_COLS].values.astype(np.float32)
     Y_true = df_slice[TARGET_COLS].values.astype(np.float32)
 
@@ -91,13 +103,13 @@ def main():
             ax.legend(loc='upper right')
 
     plt.suptitle(
-        f"DeepHydroSim Evaluation  [slice {VISUALIZE_START_IDX}:{VISUALIZE_START_IDX + VISUALIZE_LEN}]",
+        f"DeepHydroSim Evaluation  [slice {start_idx}:{start_idx + len(df_slice)}]",
         fontsize=14,
     )
     plt.tight_layout()
 
-    os.makedirs('../logs', exist_ok=True)
-    save_path = '../logs/evaluation_detail.png'
+    os.makedirs(pkg_path('logs'), exist_ok=True)
+    save_path = pkg_path('logs/evaluation_detail.png')
     plt.savefig(save_path, dpi=300)
     print(f"Plot saved to {save_path}")
     plt.show()

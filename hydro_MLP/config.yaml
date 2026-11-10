@@ -1,0 +1,40 @@
+# DeepHydroMLP training configuration.
+# All paths are relative to hydro_MLP/ regardless of the current directory.
+
+data:
+  # Directory holding the raw Stonefish logs (GeneralMission_*.csv).
+  raw_dir: "data/raw"
+  # Merged raw log produced by prepare_data.py.
+  merged_csv: "data/phy_processed/mission_log_processed.csv"
+  # Inverse-dynamics output consumed by train.py / evaluate*.py.
+  processed_csv: "data/phy_processed/mission_log_processed_Physics.csv"
+  # Savitzky-Golay differentiation (odd window, samples at 200 Hz).
+  smooth_window: 51
+  poly_order: 3
+
+model:
+  # "baseline"    = DeepHydroMLP, raw (nu, nu_dot) -> tau   (paper Table I)
+  # "physfeature" = PhysFeatureMLP, v|v| + cross terms      (paper Table I)
+  type: "physfeature"
+  input_dim: 12
+  output_dim: 6
+  hidden_dims: [128, 256, 128]
+
+training:
+  batch_size: 512
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-5
+  grad_clip: 5.0
+  epochs: 100
+  early_stop_patience: 30
+  # Contiguous-block split (paper protocol). "random" reproduces the released
+  # behaviour, whose metrics are optimistic because of temporal leakage.
+  split_mode: "block"
+  block_size: 200
+  val_split: 0.1
+  test_split: 0.1
+  num_workers: 4
+
+paths:
+  save_dir: "models"
+  log_dir: "logs"

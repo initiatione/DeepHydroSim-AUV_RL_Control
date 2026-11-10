@@ -13,10 +13,12 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
+from paths import path as pkg_path
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-FILE_PATH = '../data/phy_processed/mission_log_processed_Physics.csv'
+FILE_PATH = pkg_path('data/phy_processed/mission_log_processed_Physics.csv')
 # ---------------------------------------------------------------------------
 
 DOFS = [
