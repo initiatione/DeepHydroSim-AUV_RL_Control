@@ -39,4 +39,4 @@ pretrained:
   reset_timesteps: True
   save_buffer_at_end: True
 
-weights_dir: "src/weights"
+weights_dir: "weights"

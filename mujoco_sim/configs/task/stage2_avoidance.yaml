@@ -3,18 +3,22 @@ name: "avoidance"
 _target_: src.envs.tasks.avoidance_task.AvoidanceTask
 
 reward_weights:
+  # Reproduction note: the released weights (w_align_err 2.7, w_roll_err 3.3,
+  # time_penalty 0.1) pay a stationary, level AUV ~7.2/step, so hovering beats
+  # the 2100-point success bonus over a 650-step episode. Rebalanced so that
+  # hovering is break-even and the potential-based shaping dominates.
   phi_dist: 500.0
-  w_align_err: 2.7
-  w_roll_err: 3.3
+  w_align_err: 0.5
+  w_roll_err: 0.5
   w_sway_vel: 2.0
-  time_penalty: 0.1
+  time_penalty: 1.2
   w_accel: 0.05
   w_delta_accel: 0.5
   w_energy: 1.5
   bonus_roll: 0.2
-  success: 1500.0
-  w_final_bonus: 600.0
-  # Collision penalty (applied as a flat cost on contact; positive value subtracted)
+  success: 3000.0
+  w_final_bonus: 1000.0
+  # Collision penalty (applied once, the episode then terminates)
   w_collision: 1000.0
   # Exponential repulsion penalty per step within the warning zone
   w_danger_zone: 5.0
@@ -33,6 +37,10 @@ safety:
   warning_distance: 4.1
   # Below this distance the episode terminates as a collision
   critical_distance: 0.4
+  # Water column is z in [0.5, 14.5]; the surface is at z = 15
+  z_min: 0.5
+  z_max: 14.5
+  w_out_of_bounds: 500.0
 
 curriculum:
   initial_stage: 0

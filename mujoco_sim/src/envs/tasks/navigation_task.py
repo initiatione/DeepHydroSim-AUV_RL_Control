@@ -26,6 +26,10 @@ class NavigationTask(BaseTask):
         self.obs_dim = self.OBS_DIM
         self.last_action = None
         self.last_potential = None
+        # Optional per-step distance cost (metres -> reward). 0 keeps the
+        # released reward; >0 removes the "hover and collect posture reward"
+        # optimum that otherwise dominates stage-1 training.
+        self.w_dist = getattr(self.cfg, 'w_dist_step', 0.0)
 
     def get_obs_dim(self):
         return self.obs_dim
@@ -121,6 +125,7 @@ class NavigationTask(BaseTask):
         gyro = raw.get('gyro', np.zeros(3))
         cost_energy = 0.05 * self.cfg.w_energy * np.sum(np.square(gyro))
         cost_action = 0.05 * self.cfg.w_accel  * np.sum(np.square(action))
+        cost_dist = self.w_dist * dist
         cost_smooth = 0.0
         if self.last_action is not None:
             cost_smooth = self.cfg.w_delta_accel * np.sum(np.square(action - self.last_action))
@@ -134,6 +139,7 @@ class NavigationTask(BaseTask):
             - cost_energy
             - cost_action
             - cost_smooth
+            - cost_dist
             + bonus_roll
             - time_penalty
         )
@@ -145,6 +151,7 @@ class NavigationTask(BaseTask):
             "rew/shaping":         reward_shaping,
             "rew/align":           reward_align,
             "rew/roll":            reward_roll,
+            "rew/dist_cost":       -cost_dist,
             "state/align_cos":     align_cos,
             "state/up_cos":        up_cos,
             "state/dist":          dist,

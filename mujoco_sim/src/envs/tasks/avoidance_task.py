@@ -22,6 +22,11 @@ class AvoidanceTask(BaseTask):
         safety = getattr(config, 'safety', None)
         self.warning_distance  = getattr(safety, 'warning_distance',  4.0) if safety else 4.0
         self.critical_distance = getattr(safety, 'critical_distance', 0.4) if safety else 0.4
+        # Water-column bounds: without them the policy can climb above the
+        # surface and farm a timeout, the same failure seen in stage 3.
+        self.z_min = getattr(safety, 'z_min', 0.5) if safety else 0.5
+        self.z_max = getattr(safety, 'z_max', 14.5) if safety else 14.5
+        self.w_out_of_bounds = getattr(safety, 'w_out_of_bounds', 500.0) if safety else 500.0
 
         self.obs_dim = self.OBS_DIM
         self.last_action = None
@@ -120,6 +125,10 @@ class AvoidanceTask(BaseTask):
 
         bonus_roll = error_y_roll * self.cfg.bonus_roll
 
+        # Water-column bounds (terminal; is_done() ends the episode)
+        is_out_of_bounds = bool(pos[2] < self.z_min or pos[2] > self.z_max)
+        cost_out_of_bounds = self.w_out_of_bounds if is_out_of_bounds else 0.0
+
         # Costs
         gyro = raw.get('gyro', np.zeros(3))
         cost_energy = 0.05 * self.cfg.w_energy * np.sum(np.square(gyro))
@@ -140,6 +149,7 @@ class AvoidanceTask(BaseTask):
             - cost_smooth
             + bonus_roll
             - time_penalty
+            - cost_out_of_bounds
         )
 
         self.last_potential = current_potential
@@ -149,11 +159,13 @@ class AvoidanceTask(BaseTask):
             "rew/shaping":          reward_shaping,
             "rew/align":            reward_align,
             "rew/obstacle_penalty": -obstacle_penalty,
+            "rew/out_of_bounds":    -cost_out_of_bounds,
             "state/align_cos":      align_cos,
             "state/dist":           dist,
             "state/min_sonar_dist": min_sonar_dist,
             "is_success":           float(is_success),
             "is_collision":         float(self.current_is_collision),
+            "is_out_of_bounds":     float(is_out_of_bounds),
         }
         return total_reward, is_success, info
 
@@ -162,6 +174,10 @@ class AvoidanceTask(BaseTask):
         pos     = env.data.xpos[body_id].copy()
         if np.linalg.norm(pos - env.target_pos) < self.goals.success_dist:
             return True, "success"
+        if self.current_is_collision:
+            return True, "collision"
+        if pos[2] < self.z_min or pos[2] > self.z_max:
+            return True, "out_of_bounds"
         if current_step >= max_steps:
             return True, "timeout"
         return False, None

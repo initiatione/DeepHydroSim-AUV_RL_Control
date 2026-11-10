@@ -1,14 +1,23 @@
 name: "domain_navigation"
 
 reward_weights:
-  # Primary progress reward: +w_progress points per metre of forward advance along path
-  w_progress: 40.0
-  # Cross-track error (CTE) penalty — penalises lateral deviation from A* route
+  # Primary shaping: potential-based distance to the goal, same structure as
+  # stages 1/2. phi_dist is the potential span over goals.max_dist metres.
+  # The released reward shaped progress along the A* path only, gated by
+  # exp(-(CTE/0.35)^2), which leaves a policy that has drifted off the route
+  # with no gradient at all (measured: 8-13 m CTE, 149 points of progress
+  # against ~19k of penalties). A distance potential is non-zero everywhere.
+  phi_dist: 500.0
+  # Cross-track error (CTE) bias toward the A* route — secondary, not primary.
+  # Huber-like: quadratic below 1 m, linear above, capped at max_cte_cost.
   w_cte: 1.0
+  max_cte_cost: 20.0
   # Attitude cost — penalises non-horizontal pitch and roll
   w_pitch_roll: 20.0
-  # Heading alignment with lookahead point
-  w_align: 2.0
+  # Heading alignment with lookahead point. Kept at 1.0 (was 2.0): with
+  # w_align = 2 a stationary, correctly-oriented AUV collects +2/step against a
+  # -1/step time penalty, i.e. hovering is profitable and SAC parks there.
+  w_align: 1.0
   # Lateral and vertical velocity costs
   w_sway_vel: 2.0
   w_heave_vel: 2.0
@@ -16,12 +25,12 @@ reward_weights:
   w_accel: 0.15
   w_delta_accel: 0.5
   # Time penalty per step
-  time_penalty: 0.2
+  time_penalty: 1.0
   # Success bonus on reaching the goal
-  success: 600.0
-  w_final_bonus: 200.0
-  # Obstacle collision penalty per step in the critical zone
-  w_collision_step: 5.0
+  success: 3000.0
+  w_final_bonus: 1000.0
+  # Terminal collision penalty (applied once, the episode then terminates)
+  w_collision_step: 500.0
 
 goals:
   success_dist: 2.0
@@ -32,6 +41,12 @@ goals:
 safety:
   warning_distance: 3.5
   critical_distance: 0.5
+  # Water column is z in [0.5, 14.5]; the surface is at z = 15. Leaving the
+  # column terminates the episode with a flat penalty instead of letting the
+  # policy fly to the surface and farm a long timeout.
+  z_min: 0.5
+  z_max: 14.5
+  w_out_of_bounds: 500.0
 
 curriculum:
   initial_stage: 0

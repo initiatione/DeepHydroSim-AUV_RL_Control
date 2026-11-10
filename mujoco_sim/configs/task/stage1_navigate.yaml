@@ -3,17 +3,25 @@ name: "navigate"
 _target_: envs.tasks.navigation_task.NavigationTask
 
 reward_weights:
-  phi_dist: 350.0
+  # Reproduction note: the released weights (phi_dist 350, time_penalty 0.1)
+  # make hovering optimal — the per-step align/roll rewards pay ~5.5/step for
+  # standing still, which outweighs the 1500 success bonus over 650 steps.
+  # SAC therefore converges to a stable hover with 0% success. The values
+  # below keep the same reward structure but make goal-reaching dominant.
+  phi_dist: 600.0
   w_align_err: 2.5
   w_roll_err: 3.0
   w_sway_vel: 2.0
-  time_penalty: 0.1
+  time_penalty: 1.0
   w_accel: 0.05
   w_delta_accel: 0.5
   w_energy: 1.5
   bonus_roll: 0.2
-  success: 1500.0
-  w_final_bonus: 500.0
+  success: 3000.0
+  w_final_bonus: 1000.0
+  # Per-step distance cost. 0 = released reward (hover optimum); 0.5 makes
+  # standing still slightly negative and approaching clearly profitable.
+  w_dist_step: 0.5
 
 goals:
   success_dist: 1.0

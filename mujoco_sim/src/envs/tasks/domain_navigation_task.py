@@ -22,16 +22,30 @@ class DomainNavigationTask(BaseTask):
         self.w_cte = getattr(self.cfg, 'w_cte', 15.0)
         self.w_collision_step = getattr(self.cfg, 'w_collision_step', 25.0)
         self.w_final_bonus = getattr(self.cfg, 'w_final_bonus', 500.0)
+        # Distance-potential scale (same structure as stage 1/2)
+        self.phi_dist = getattr(self.cfg, 'phi_dist', 500.0)
+        self.last_potential = 0.0
 
         # Safety thresholds (read from config, fall back to safe defaults)
         safety_cfg = getattr(self.config, 'safety', None)
         self.warning_distance = getattr(safety_cfg, 'warning_distance', 4.0) if safety_cfg else 4.0
         self.critical_distance = getattr(safety_cfg, 'critical_distance', 0.4) if safety_cfg else 0.4
 
-        # obs = [pos(3), vel(3), gyro(3), quat(4), gravity(3), depth(1), sonar(15), alt(1), accel(3), cte(3)] = 39
+        # Water-column bounds. Without them the policy can fly above the
+        # surface (z > 15) and farm a long timeout with a huge cross-track
+        # error, which makes SAC collapse instead of following the path.
+        self.z_min = getattr(getattr(config, 'safety', None), 'z_min', 0.5)
+        self.z_max = getattr(getattr(config, 'safety', None), 'z_max', 14.5)
+        self.w_out_of_bounds = getattr(getattr(config, 'safety', None), 'w_out_of_bounds', 500.0)
+        self.max_cte_cost = getattr(self.cfg, 'max_cte_cost', 20.0)
+
+        # obs = [pos(3), vel(3), gyro(3), quat(4), gravity(3), depth(1),
+        #        sonar(15), alt(1), accel(3), cte(3)] = 39
         self.obs_dim = 39
 
-        self.planner = AStarPlanner(resolution=0.05, safe_margin=1.7)
+        # debug=False: the planner runs on every reset, so writing the debug
+        # map each episode would dominate the training loop's wall time.
+        self.planner = AStarPlanner(resolution=0.05, safe_margin=1.7, debug=False)
 
         # Path state — fully initialised here, reset() overwrites each episode
         self.waypoints = []
@@ -40,7 +54,6 @@ class DomainNavigationTask(BaseTask):
         self.current_seg_idx = 0
 
         # Progress tracking (monotonic: never decreases within an episode)
-        self.last_s_current = 0.0
         self.max_s_reached = 0.0
 
         # Smoothed look-ahead point for heading alignment
@@ -63,7 +76,6 @@ class DomainNavigationTask(BaseTask):
         self.last_action = np.zeros(env.action_space.shape)
         self.current_is_collision = False
         self.max_s_reached = 0.0
-        self.last_s_current = 0.0
         self.smoothed_lookahead_pt = None
 
         env.target_pos = getattr(env, 'fixed_target_pos', np.array([18.0, 0.0, 10.0]))
@@ -83,8 +95,9 @@ class DomainNavigationTask(BaseTask):
         self.total_path_length = self.wp_cum_dists[-1] if len(self.waypoints) > 1 else 0.0
 
         self.current_seg_idx = 0
-        s_curr, _ = self._get_projection_status(start_pos)
-        self.last_s_current = s_curr
+        self._get_projection_status(start_pos)
+        self.last_potential = -(np.linalg.norm(start_pos - env.target_pos)
+                                / self.goals.max_dist) * self.phi_dist
 
         # Force-initialise smooth look-ahead so the first frame has no lag
         self.smoothed_lookahead_pt = self._map_1d_s_to_3d_pos(
@@ -154,18 +167,29 @@ class DomainNavigationTask(BaseTask):
         rot_mat = env.data.xmat[body_id].reshape(3, 3)
         pos = env.data.xpos[body_id].copy()
 
-        # 1. Path progress (monotonic delta-S reward)
-        s_current, cross_track_error = self._get_projection_status(pos)
-        delta_s = self.max_s_reached - self.last_s_current
-        cte_tolerance = 0.35
-        progress_multiplier = np.exp(-(cross_track_error / cte_tolerance) ** 2)
-        reward_progress = delta_s * getattr(self.cfg, 'w_progress', 40.0) * progress_multiplier
+        # 1. Potential-based distance shaping toward the goal.
+        # The released reward used delta-S along the A* path gated by
+        # exp(-(CTE/tol)^2). That signal vanishes as soon as the policy drifts
+        # more than a few metres off the route: measured on a 50k checkpoint the
+        # agent sat 8-13 m off-path, tilted ~57 deg, earning 149 points of
+        # progress against 9805 of CTE and 9069 of attitude cost. Nothing in the
+        # reward then points back. The distance potential is non-zero
+        # everywhere, so there is always a gradient, and the CTE term below
+        # still biases the agent onto the planned (obstacle-free) route.
+        dist_to_final = np.linalg.norm(pos - env.target_pos)
+        current_potential = -(dist_to_final / self.goals.max_dist) * self.phi_dist
+        reward_progress = (current_potential - self.last_potential) * 10.0
+        self.last_potential = current_potential
 
         # 2. Cross-track error penalty (Huber-like: quadratic near path, linear far)
+        # Capped: an unbounded CTE cost lets a lost policy accumulate -8e4 over
+        # one timeout episode, which destroys the critic's value scale.
+        s_current, cross_track_error = self._get_projection_status(pos)
         if cross_track_error < 1.0:
             cost_cte = self.w_cte * (cross_track_error ** 2)
         else:
             cost_cte = self.w_cte * (2.0 * cross_track_error - 1.0)
+        cost_cte = min(cost_cte, self.max_cte_cost)
 
         # 3. Attitude cost: penalise non-horizontal orientation
         z_x, z_y = rot_mat[0, 2], rot_mat[1, 2]
@@ -210,7 +234,6 @@ class DomainNavigationTask(BaseTask):
         # 7. Success / terminal reward
         reward_success = 0.0
         is_success = False
-        dist_to_final = np.linalg.norm(pos - env.target_pos)
 
         if dist_to_final < self.goals.success_dist:
             is_success = True
@@ -218,6 +241,12 @@ class DomainNavigationTask(BaseTask):
             time_penalty_applied = 0.0
         else:
             time_penalty_applied = self.cfg.time_penalty
+
+        # 8. Water-column bounds. Leaving the water column terminates the
+        # episode in is_done(); charge a flat terminal penalty here so the
+        # critic sees the cost on the transition that leaves the bounds.
+        is_out_of_bounds = bool(pos[2] < self.z_min or pos[2] > self.z_max)
+        cost_out_of_bounds = self.w_out_of_bounds if is_out_of_bounds else 0.0
 
         total_reward = (
             reward_progress
@@ -231,9 +260,9 @@ class DomainNavigationTask(BaseTask):
             - cost_action
             - cost_smooth
             - time_penalty_applied
+            - cost_out_of_bounds
         )
 
-        self.last_s_current = self.max_s_reached
         self.last_action = action.copy()
 
         info = {
@@ -243,11 +272,17 @@ class DomainNavigationTask(BaseTask):
             "rew/pitch_roll_cost": -cost_pitch_roll,
             "rew/obstacle_penalty": -reward_obstacle_penalty,
             "rew/overspeed": -cost_overspeed,
+            "rew/sway_heave": -cost_sway_heave,
+            "rew/action": -cost_action,
+            "rew/smooth": -cost_smooth,
+            "rew/time": -time_penalty_applied,
+            "rew/out_of_bounds": -cost_out_of_bounds,
             "state/s_current": s_current,
             "state/cross_track_err": cross_track_error,
             "state/min_sonar_dist": min_sonar_dist,
             "is_success": float(is_success),
             "is_collision": float(self.current_is_collision),
+            "is_out_of_bounds": float(is_out_of_bounds),
         }
 
         return total_reward, is_success, info
@@ -257,6 +292,10 @@ class DomainNavigationTask(BaseTask):
         pos = env.data.xpos[body_id].copy()
         if np.linalg.norm(pos - env.target_pos) < self.goals.success_dist:
             return True, "success"
+        if self.current_is_collision:
+            return True, "collision"
+        if pos[2] < self.z_min or pos[2] > self.z_max:
+            return True, "out_of_bounds"
         if current_step >= max_steps:
             return True, "timeout"
         return False, None
@@ -280,7 +319,12 @@ class DomainNavigationTask(BaseTask):
         target_vec_body = rot_mat.T @ (self.smoothed_lookahead_pt - pos_world)
         gravity_body = rot_mat.T @ np.array([0.0, 0.0, -1.0])
 
-        obs_pos = np.clip(target_vec_body / self.goals.max_dist, -1.0, 1.0)
+        # The lookahead point is always ~0.7 m ahead, so normalising it by
+        # goals.max_dist (45 m) squeezes the only goal-direction cue down to
+        # |obs| ~ 0.017 — 20-50x smaller than quat/gravity/accel, and the policy
+        # cannot see it (measured: stage 0 success stuck at 1.7%). A fixed 3 m
+        # scale keeps the cue at O(0.3) and still saturates when far off-path.
+        obs_pos = np.clip(target_vec_body / 3.0, -1.0, 1.0)
         obs_vel = np.clip(raw['dvl'] / 2.0, -1.0, 1.0)
         obs_gyro = np.clip(raw['gyro'] / 6.0, -1.0, 1.0)
         obs_quat = raw['quat']
