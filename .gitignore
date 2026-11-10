@@ -20,6 +20,7 @@ cpp_sim/logs/
 
 hydro_MLP/logs/
 hydro_MLP/models/
+hydro_MLP/models_*/
 # hydro_MLP/data/  
 
 mujoco_sim/outputs/
@@ -35,6 +36,12 @@ tb_logs/
 
 hydro_MLP/data/
 *.csv
+
+# Local Stonefish build used for the teacher simulator
+.deps/
+
+# Local tooling caches
+.serena/
 
 docs/
 
